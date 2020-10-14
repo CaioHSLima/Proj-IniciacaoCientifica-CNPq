@@ -1,0 +1,376 @@
+---
+output: 
+  pdf_document
+---
+
+
+
+```{r echo=FALSE}
+knitr::opts_chunk$set(echo = F, 
+                      fig.align = "center",
+                      fig.pos = 'H',
+                      warning=FALSE, 
+                      message=FALSE,
+                      fig.height = 3.8)
+```
+
+#Aplicando em dados reais
+
+Os dados já estão pré-processados e estão disponíveis na plataforma do NCBI, sendo acessados pelo número de série GSE131761.
+
+```{r message=FALSE, warning=FALSE}
+#Carregando os pacotes necessários:
+
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#install.packages("BiocManager")
+
+#BiocManager::install("GEOquery", "Biobase", "genefilter")
+#install.packages(c("tidyverse", "FactoMineR", "factoextra"))
+
+
+
+library(GEOquery) #Carregar e manipular a base de dados
+library(tidyverse) #Manipulação de data frames e criação de gráficos
+library(stats)
+library(FactoMineR) #
+library(factoextra)
+library(Biobase)
+library(genefilter)
+```
+
+
+## Importando os dados
+
+```{r}
+# Imporatando a matriz dados (GEOquery)
+gse <- getGEO("GSE131761",GSEMatrix=T) #Pode demorar alguns segundos/minutos
+
+# Informações sobre a base dados
+show(gse)
+
+# Extraindo o conjunto de dados e deixando em formato de data frame
+# As linhas corresponde aos genes e as colunas aos pacientes 
+dados <- exprs(gse[[1]]) %>% as.data.frame() 
+
+# Fenótipo dos dados (informações da amostra)
+Pheno <- pData(gse[[1]]) 
+
+# Renomeando a saida dos diagnósticos
+Pheno$characteristics_ch1[Pheno$characteristics_ch1 == "diagnosis: control patient"] <- "Controle"
+Pheno$characteristics_ch1[Pheno$characteristics_ch1 == "diagnosis: non-septic shock"] <- "Choque Não Séptico"
+Pheno$characteristics_ch1[Pheno$characteristics_ch1 == "diagnosis: septic shock"] <- "Choque Séptico"
+
+#Diagnósticos possíveis: Choque séptico, Não choque séptico e Controle
+Pheno$characteristics_ch1 %>% table() 
+```
+
+## Aplicando técnicas de Agrupamento
+
+```{r}
+# Data fram com os possíveis diagnósticos, para conparar com os futuros resultados
+Diag <- Pheno %>% select(characteristics_ch1)
+colnames(Diag) <- "Diagnostico"
+```
+
+
+### Agrupamento por K-means
+
+Realizando o algoritmo de K-means, dividindo em 3 grupos. 
+
+```{r}
+# Deixando em formato tidy (linhas são individuos e colunas são as variáveis)
+df <- t(dados)
+# Normalizando (deixando os genes nas mesma escala e assim comparáveis)
+z <- scale(df)
+```
+
+```{r}
+# Seed para deizar os resultados reprodutíveis
+set.seed(1)
+
+# Algoritmo K-means, utilizando dados normalizados e dividindo em 3 grupos
+km.res <- kmeans(z, 3, nstart = 25)
+
+# Adicionando ao dados com diagnostico verdadeiro uma coluna com as grupos obtidos  pelo k-means
+kmean_res <- Diag  %>%
+  mutate(Cluster = km.res$cluster)
+
+# Verificando como ficou a divisão entre os grupos
+kmean_res %>% select(Diagnostico, Cluster) %>% table()
+```
+
+Vemos que pela divisão por K-means, houve um confundimento muito grande entre os Choques, misturados entre os Clusters 1 e 2. Podemos vizualizar isso melhor no gráfico a seguir.
+
+```{r fig.cap=, message=FALSE, warning=FALSE}
+# Gráfico do resultado de Kmeans
+fviz_cluster(km.res, data = z,geom = "point",
+             palette = c("#2E9FDF", "#00AFBB", "#E7B800", "#FC4E07"),
+             ellipse.type = "t", 
+             repel = TRUE, main = "",
+             ggtheme = theme_minimal()
+             )
+```
+
+
+### Clustering Hierárquico
+
+Agrupando os dados de forma hieráquica, buscando dividir em 3 grupos.
+
+```{r}
+# Calculando a distância euclidiana, necessária para o método hieráquico
+dist_df <- dist(z) 
+
+# Algoritmo do cluster hieráquico, pelo método "ward.D" (se mostrou ser o melhor, mas sinta-se livre para testar outros métodos de agrupamento).
+hc_z <- hclust(dist_df, method = "ward.D") 
+```
+
+
+```{r,  fig.cap= "\\label{fig:Fig2} Dendograma com 3 Clusters"}
+# Visualizando os resultados do Hierárquico
+fviz_dend(hc_z, k = 3, 
+          cex = 0.5, # label size
+          color_labels_by_k = TRUE, # color labels by groups
+          rect = TRUE,
+          show_labels = F, 
+          main = "", 
+          ylab = "Altura", xlab = "Pacientes"
+          )
+```
+
+```{r}
+# Data frame que mostra a qual cluster pertence cada paciente.
+clust <- cutree(hc_z, k = 3)
+res <- mutate(Diag, Cluster = clust)
+
+# Verificando como ficou a divisão entre os grupos
+
+res %>% select(Diagnostico, Cluster) %>% table() 
+```
+
+Vemos que as 15 obs controle ficaram apenas no grupo 3, ou seja, elas diferentes dos outros grupos. Pacientes com choque e com não choque séptico estão sendo confundidas nos grupos 1 e 2.
+
+### PCA
+
+Reduzindo o número de variáveis à aqeuelas que mais explicam a variabilidade dos dados.
+
+```{r}
+# Retirando as 50 primeiras componentes por PCA
+res.pca <- PCA(df, ncp = 50,graph = F)
+
+# Visualizando porcentagem de variabilidade explicada pelas primeiras 20 componentes
+fviz_eig(res.pca, addlabels = T,  ylim = c(0,25), ncp = 20, ylab = "Percentagem de Variância Explicada", xlab = "Componentes")
+
+# As 7 primeiras explicam cerca de 45%
+```
+
+
+
+```{r}
+# Vizualizando os autovalores das componeneste (para o critério de escolha)
+res.pca$eig[1:20,1] %>% as.data.frame() %>%
+  ggplot(aes(1:20, .)) + 
+  geom_line() + 
+  geom_point() + 
+  labs(x = "Componentes", y = "Autovalores") +
+  theme_bw()
+
+# A partir da 7ª componente, a descida do gráfico se "estabiliza"
+```
+
+
+
+```{r}
+# Retirando as 7 primeiras componentes e normalizando
+pca <- res.pca$ind$coord
+z.pca<- scale(pca[,1:7])
+```
+
+
+#### K-means com PCA
+
+
+```{r}
+# Seed para deizar os resultados reprodutíveis
+set.seed(1)
+
+# Algoritmo K-means, utilizando as componentes pricipais normalizadas e dividindo em 3 grupos
+km.res <- kmeans(z.pca, 3, nstart = 25)
+
+# Adicionando ao dados com diagnostico verdadeiro uma coluna com as grupos obtidos  pelo k-means
+kmean_res <- Diag  %>%
+  mutate(Cluster = km.res$cluster)
+
+# Verificando como ficou a divisão entre os grupos
+kmean_res %>% select(Diagnostico, Cluster) %>% table()
+```
+
+Os resultados foram similares aos obtidos anteriormente (foi testado diferentes números de componentes, mas sem sucesso). 
+
+#### Cluster Hierárquico com PCA
+
+```{r warning=FALSE}
+# Calculando a distância euclidiana
+dist_df <- dist(z.pca)
+
+# Hierarquico pelo método Ward.D
+hc_z <- hclust(dist_df, method = "ward.D") 
+
+# Data frame que mostra a qual cluster pertence cada paciente.
+clust <- cutree(hc_z, k = 3)
+res <- mutate(Diag, Cluster = clust)
+
+# Verificando os resultados
+res %>% select(Diagnostico, Cluster) %>% table()
+
+```
+
+Mesmas conclusões.
+
+### FIltrando Genes
+
+Existem diversos critérios para se realizar a filtragem de genes, porém o filtro pelo coeficiente de variação se mostrou mais adequado.
+
+```{r ,  fig.cap= "\\label{fig:Fig4}Histograma dos Coeficientes de Variação dos Genes"}
+#Calculando o coeficiente de variação (desvio padrão dividido pela média de cada gene)
+CV_linhas <- rowSds(dados)/rowMeans(dados)
+
+
+
+# Vendo a distribuição dos genes por seus respectivos coeficientes de variação
+# (Boxplot + Histograma)
+layout(mat = matrix(c(1,2),2,1, byrow=TRUE),  height = c(1,8))
+par(mar=c(0, 3.1, 1.1, 2.1))
+boxplot(CV_linhas , horizontal=TRUE , ylim=c(0,0.3), xaxt="n" , col=rgb(0.8,0.8,0,0.5) , frame=F)
+par(mar=c(4, 3.1, 1.1, 2.1))
+hist(CV_linhas , breaks=30 , col=rgb(0.2,0.8,0.5,0.5) , border=F , main="" , xlab="Coeficiente de Variação", xlim=c(0,0.3))
+```
+
+O critéri pelo coeficiente de variação (CV) recomenda selecionar os genes com maiores CV. Para isto, os genes foram filtrados em diversas possibilidades de cortes a partir do quantil do conjunto de dados.
+
+Além disso, outro critério foi realizado em seguidsa, utilizando-se teste de hipótes em cada gene para verificar se no mesmo havia diferença significativa entre os grupos de interesse (Choque septico e Choque não septico).
+
+
+
+```{r eval=FALSE, include=FALSE}
+#Realizando o teste de hipótese da diferença entre os dois grupos: Choque Sept e Choque Não Sept
+sem_cont <- Diag$Diagnostico != "Controle"
+sem <- NULL
+for (i in 1:34127) {
+  t <- aov(df[sem_cont,i] ~ Diag$Diagnostico[sem_cont])
+  sem <- append(sem, summary(t)[[1]][["Pr(>F)"]][1])
+}
+
+```
+
+Assim, testou-se diferentes cobinações de cortes por quantil e nível de sginificância, para posteriormente verificar qual filtro de genes teve resultado melhor (pelo cluster Hierárquico). Passamos também a dividir em 4 clusters, que dividiu melhor os dados
+```{r eval=FALSE, include=FALSE}
+#Testando para diferentes combinações de quantis e níveis de significância
+lista <- list()
+a <- 1
+b <- 1
+c <- 1
+teste <- as.data.frame(a) %>% cbind(b)
+for (i in seq(0,0.95,0.01)) { #Quantil 0 a 0.95, indeo de 0.01 em 0.01
+  Corte <- CV_linhas > quantile(CV_linhas, i)
+  for (j in seq(0.005,0.5,0.005)) { #Quantil 0.005 a 0.5, indeo de 0.005 em 0.005
+    #Filtro
+    df_filt <- t(dados[c(c(1:34127)[Corte])[p.adjust(sem[Corte]) < j],]) 
+    
+    z_filt <- scale(df_filt) #Normalizando
+    dist_df <- dist(z_filt) #Calculando a distância euclidiana
+    
+    #Cluster Hierarq
+    hc_z <- hclust(dist_df, method = "ward.D") 
+    
+    #Guardando os resultados na "lista"
+    clust <- cutree(hc_z, k = 4) #Dividindo em 4
+    Diag_seg <- mutate(Diag, cluster = clust)
+    lista[b][[1]] <- Diag_seg %>% 
+      select(Diagnostico, cluster) %>% table() 
+    
+    #Guardando as iterações (qualtil e significancia)
+    teste[c,] <- c(i,j)
+    b <- b + 1
+    c <- c +1 
+  }
+  a <- a +1
+}
+```
+
+```{r}
+# Primeiros três resultados
+head(lista,3)
+
+# Vemos que as divisões estavam indicando:
+# Cluster "1" em sua maioria do Choque Séptico
+# Cluster "2" e "3" uma mistura entre Choque Séptico e Choque não séptico
+# Cluster "4" em sua maioria de Controle
+```
+
+```{r}
+#Pegando os índices das divisões em que o cluster "4" possui apenas pessoas Controle
+ind <- NULL
+for (i in 1:9600) {
+  if (lista[i][[1]][10] == 0 & lista[i][[1]][11] == 0) {
+    ind <- append(ind, i)
+  }
+}
+
+# O cluster "3" possui maioria de Choque Não Séptico
+# Então vamos tentar achar a divisão que indicou o máximo de Choque não Séptico, e com o mínimo de Choque Séptico, no cluster "3"
+
+Cns.max <- NULL # Célula indicando o número de Choque não sépticos no cluster 3
+Cs.min <- NULL # Célula indicando o número de Choque sépticos no cluster 3
+for (i in ind) {
+  Cns.max <- append(Cns.max, lista[i][[1]][7])
+  Cs.min <- append(Cs.min, lista[i][[1]][8])
+}
+
+#Quero maximizar Cns.max e minimizar Cs.min, como pode ser visto em plot(Cns.max, Cs.min)
+
+plot(Cns.max, Cs.min)
+
+# Vemos que o valor max de Cns possui um valor também alto de cs (RUIM)
+# Em seguida, há o valor Cns = 26, em que temos um Cs = 7, valores aceitáveis
+
+# Desta forma, temos:
+lista[ind[Cns.max == 26 & Cs.min == 7]][[1]]
+
+# Aparenta ser um bom ajuste, então vamos usar a divisão do indice 2402, com corte acima de 24% no quantil e nível de significancia de 0.01
+teste[ind[Cns.max == 26 & Cs.min == 7],]
+```
+
+
+```{r}
+# Pegando os dados escolhidos pelos filtros e Normalizando
+Corte <- CV_linhas > quantile(CV_linhas, 0.24)
+df_filt <- t(dados[c(c(1:34127)[Corte])[p.adjust(sem[Corte]) < 0.01],]) 
+z_filt <- scale(df_filt)
+```
+
+```{r}
+dist_df <- dist(z_filt) #Calculando a distância euclidiana
+hc_z <- hclust(dist_df, method = "ward.D") 
+```
+
+
+```{r}
+# Visualizando o resultado final
+fviz_dend(hc_z, k = 4, 
+          cex = 0.5, # label size
+          color_labels_by_k = TRUE, # color labels by groups
+          rect = TRUE,
+          show_labels = F, 
+          main = "", 
+          ylab = "Altura", xlab = "Pacientes"
+          )
+```
+
+```{r}
+# Data frame que mostra a qual cluster pertence cada paciente.
+clust <- cutree(hc_z, k = 4)
+Diag_seg <- mutate(Diag, cluster = clust)
+
+Diag_seg %>% select(Diagnostico, cluster) %>% table() 
+
+```
